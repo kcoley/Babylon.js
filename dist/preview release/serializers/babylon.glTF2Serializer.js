@@ -1,3 +1,5 @@
+BABYLON.Effect.ShadersStore['textureTransformPixelShader'] = "precision highp float;\nvarying vec2 vUV;\nuniform sampler2D textureSampler;\nuniform mat4 textureTransformMat;\nvoid main(void) {\nvec2 uvTransformed=(textureTransformMat*vec4(vUV.xy,1,1)).xy;\ngl_FragColor=texture2D(textureSampler,uvTransformed);\n}";
+
 /// <reference path="../../../../dist/preview release/babylon.d.ts"/>
 var BABYLON;
 (function (BABYLON) {
@@ -64,7 +66,10 @@ var BABYLON;
              * @param options Options to modify the behavior of the exporter
              */
             function _Exporter(babylonScene, options) {
+                this._extensions = {};
                 this._asset = { generator: "BabylonJS", version: "2.0" };
+                this._extensionsUsed = [];
+                this._extensionsRequired = [];
                 this._babylonScene = babylonScene;
                 this._bufferViews = [];
                 this._accessors = [];
@@ -83,7 +88,78 @@ var BABYLON;
                 this._shouldExportTransformNode = _options.shouldExportTransformNode ? _options.shouldExportTransformNode : function (babylonTransformNode) { return true; };
                 this._animationSampleRate = _options.animationSampleRate ? _options.animationSampleRate : 1 / 60;
                 this._glTFMaterialExporter = new GLTF2._GLTFMaterialExporter(this);
+                this._loadExtensions();
             }
+            _Exporter.prototype._applyExtensions = function (property, actionAsync) {
+                for (var _i = 0, _a = _Exporter._ExtensionNames; _i < _a.length; _i++) {
+                    var name_1 = _a[_i];
+                    var extension = this._extensions[name_1];
+                    if (extension.enabled) {
+                        var exporterProperty = property;
+                        exporterProperty._activeLoaderExtensions = exporterProperty._activeLoaderExtensions || {};
+                        var activeLoaderExtensions = exporterProperty._activeLoaderExtensions;
+                        if (!activeLoaderExtensions[name_1]) {
+                            activeLoaderExtensions[name_1] = true;
+                            try {
+                                var result = actionAsync(extension);
+                                if (result) {
+                                    return result;
+                                }
+                            }
+                            finally {
+                                delete activeLoaderExtensions[name_1];
+                                delete exporterProperty._activeLoaderExtensions;
+                            }
+                        }
+                    }
+                }
+                return null;
+            };
+            _Exporter.prototype._extensionsPreExportTextureAsync = function (context, babylonTexture, mimeType) {
+                return this._applyExtensions(babylonTexture, function (extension) { return extension.preExportTextureAsync && extension.preExportTextureAsync(context, babylonTexture, mimeType); });
+            };
+            _Exporter.prototype._extensionsPostExportMeshPrimitiveAsync = function (context, meshPrimitive, babylonSubMesh, binaryWriter) {
+                return this._applyExtensions(meshPrimitive, function (extension) { return extension.postExportMeshPrimitiveAsync && extension.postExportMeshPrimitiveAsync(context, meshPrimitive, babylonSubMesh, binaryWriter); });
+            };
+            /**
+             * Load glTF serializer extensions
+             */
+            _Exporter.prototype._loadExtensions = function () {
+                for (var _i = 0, _a = _Exporter._ExtensionNames; _i < _a.length; _i++) {
+                    var name_2 = _a[_i];
+                    var extension = _Exporter._ExtensionFactories[name_2](this);
+                    this._extensions[name_2] = extension;
+                }
+            };
+            /**
+             * Registers a glTF exporter extension
+             * @param name Name of the extension to export
+             * @param factory The factory function that creates the exporter extension
+             */
+            _Exporter.RegisterExtension = function (name, factory) {
+                BABYLON.Tools.Log("Registering extension " + name);
+                if (_Exporter.UnregisterExtension(name)) {
+                    BABYLON.Tools.Warn("Extension with the name " + name + " already exists");
+                }
+                _Exporter._ExtensionFactories[name] = factory;
+                _Exporter._ExtensionNames.push(name);
+            };
+            /**
+             * Un-registers an exporter extension
+             * @param name The name fo the exporter extension
+             * @returns A boolean indicating whether the extension has been un-registered
+             */
+            _Exporter.UnregisterExtension = function (name) {
+                if (!_Exporter._ExtensionFactories[name]) {
+                    return false;
+                }
+                delete _Exporter._ExtensionFactories[name];
+                var index = _Exporter._ExtensionNames.indexOf(name);
+                if (index !== -1) {
+                    _Exporter._ExtensionNames.splice(index, 1);
+                }
+                return true;
+            };
             /**
              * Lazy load a local engine with premultiplied alpha set to false
              */
@@ -488,6 +564,12 @@ var BABYLON;
                 var glTF = {
                     asset: this._asset
                 };
+                if (this._extensionsUsed && this._extensionsUsed.length) {
+                    glTF.extensionsUsed = this._extensionsUsed;
+                }
+                if (this._extensionsRequired && this._extensionsRequired.length) {
+                    glTF.extensionsRequired = this._extensionsRequired;
+                }
                 if (buffer.byteLength) {
                     glTF.buffers = [buffer];
                 }
@@ -822,7 +904,8 @@ var BABYLON;
              * @param babylonTransformNode Babylon mesh to get the primitive attribute data from
              * @param binaryWriter Buffer to write the attribute data to
              */
-            _Exporter.prototype.setPrimitiveAttributes = function (mesh, babylonTransformNode, binaryWriter) {
+            _Exporter.prototype.setPrimitiveAttributesAsync = function (mesh, babylonTransformNode, binaryWriter) {
+                var promises = [];
                 var bufferMesh = null;
                 var bufferView;
                 var uvCoordsPresent;
@@ -979,9 +1062,16 @@ var BABYLON;
                                 meshPrimitive.material = materialIndex;
                             }
                             mesh.primitives.push(meshPrimitive);
+                            var promise = this._extensionsPostExportMeshPrimitiveAsync("postExport", meshPrimitive, submesh, binaryWriter);
+                            if (promise) {
+                                promises.push();
+                            }
                         }
                     }
                 }
+                return Promise.all(promises).then(function () {
+                    /* do nothing */
+                });
             };
             /**
              * Creates a glTF scene based on the array of meshes
@@ -997,48 +1087,53 @@ var BABYLON;
                 var directDescendents;
                 var nodes = babylonScene.transformNodes.concat(babylonScene.meshes);
                 return this._glTFMaterialExporter._convertMaterialsToGLTFAsync(babylonScene.materials, "image/png" /* PNG */, true).then(function () {
-                    _this._nodeMap = _this.createNodeMapAndAnimations(babylonScene, nodes, _this._shouldExportTransformNode, binaryWriter);
-                    _this._totalByteLength = binaryWriter.getByteOffset();
-                    // Build Hierarchy with the node map.
-                    for (var _i = 0, nodes_1 = nodes; _i < nodes_1.length; _i++) {
-                        var babylonTransformNode = nodes_1[_i];
-                        glTFNodeIndex = _this._nodeMap[babylonTransformNode.uniqueId];
-                        if (glTFNodeIndex != null) {
-                            glTFNode = _this._nodes[glTFNodeIndex];
-                            if (!babylonTransformNode.parent) {
-                                if (!_this._shouldExportTransformNode(babylonTransformNode)) {
-                                    BABYLON.Tools.Log("Omitting " + babylonTransformNode.name + " from scene.");
-                                }
-                                else {
-                                    if (_this._convertToRightHandedSystem) {
-                                        if (glTFNode.translation) {
-                                            glTFNode.translation[2] *= -1;
-                                            glTFNode.translation[0] *= -1;
+                    return _this.createNodeMapAndAnimationsAsync(babylonScene, nodes, _this._shouldExportTransformNode, binaryWriter).then(function (nodeMap) {
+                        _this._nodeMap = nodeMap;
+                        _this._totalByteLength = binaryWriter.getByteOffset();
+                        if (_this._totalByteLength == undefined) {
+                            throw new Error("undefined byte length!");
+                        }
+                        // Build Hierarchy with the node map.
+                        for (var _i = 0, nodes_1 = nodes; _i < nodes_1.length; _i++) {
+                            var babylonTransformNode = nodes_1[_i];
+                            glTFNodeIndex = _this._nodeMap[babylonTransformNode.uniqueId];
+                            if (glTFNodeIndex != null) {
+                                glTFNode = _this._nodes[glTFNodeIndex];
+                                if (!babylonTransformNode.parent) {
+                                    if (!_this._shouldExportTransformNode(babylonTransformNode)) {
+                                        BABYLON.Tools.Log("Omitting " + babylonTransformNode.name + " from scene.");
+                                    }
+                                    else {
+                                        if (_this._convertToRightHandedSystem) {
+                                            if (glTFNode.translation) {
+                                                glTFNode.translation[2] *= -1;
+                                                glTFNode.translation[0] *= -1;
+                                            }
+                                            glTFNode.rotation = glTFNode.rotation ? BABYLON.Quaternion.FromArray([0, 1, 0, 0]).multiply(BABYLON.Quaternion.FromArray(glTFNode.rotation)).asArray() : (BABYLON.Quaternion.FromArray([0, 1, 0, 0])).asArray();
                                         }
-                                        glTFNode.rotation = glTFNode.rotation ? BABYLON.Quaternion.FromArray([0, 1, 0, 0]).multiply(BABYLON.Quaternion.FromArray(glTFNode.rotation)).asArray() : (BABYLON.Quaternion.FromArray([0, 1, 0, 0])).asArray();
-                                    }
-                                    scene.nodes.push(glTFNodeIndex);
-                                }
-                            }
-                            directDescendents = babylonTransformNode.getDescendants(true);
-                            if (!glTFNode.children && directDescendents && directDescendents.length) {
-                                var children = [];
-                                for (var _a = 0, directDescendents_1 = directDescendents; _a < directDescendents_1.length; _a++) {
-                                    var descendent = directDescendents_1[_a];
-                                    if (_this._nodeMap[descendent.uniqueId] != null) {
-                                        children.push(_this._nodeMap[descendent.uniqueId]);
+                                        scene.nodes.push(glTFNodeIndex);
                                     }
                                 }
-                                if (children.length) {
-                                    glTFNode.children = children;
+                                directDescendents = babylonTransformNode.getDescendants(true);
+                                if (!glTFNode.children && directDescendents && directDescendents.length) {
+                                    var children = [];
+                                    for (var _a = 0, directDescendents_1 = directDescendents; _a < directDescendents_1.length; _a++) {
+                                        var descendent = directDescendents_1[_a];
+                                        if (_this._nodeMap[descendent.uniqueId] != null) {
+                                            children.push(_this._nodeMap[descendent.uniqueId]);
+                                        }
+                                    }
+                                    if (children.length) {
+                                        glTFNode.children = children;
+                                    }
                                 }
                             }
                         }
-                    }
-                    ;
-                    if (scene.nodes.length) {
-                        _this._scenes.push(scene);
-                    }
+                        ;
+                        if (scene.nodes.length) {
+                            _this._scenes.push(scene);
+                        }
+                    });
                 });
             };
             /**
@@ -1049,8 +1144,9 @@ var BABYLON;
              * @param binaryWriter Buffer to write binary data to
              * @returns Node mapping of unique id to index
              */
-            _Exporter.prototype.createNodeMapAndAnimations = function (babylonScene, nodes, shouldExportTransformNode, binaryWriter) {
+            _Exporter.prototype.createNodeMapAndAnimationsAsync = function (babylonScene, nodes, shouldExportTransformNode, binaryWriter) {
                 var _this = this;
+                var promiseChain = Promise.resolve();
                 var nodeMap = {};
                 var nodeIndex;
                 var runtimeGLTFAnimation = {
@@ -1059,38 +1155,45 @@ var BABYLON;
                     samplers: []
                 };
                 var idleGLTFAnimations = [];
-                var node;
-                for (var _i = 0, nodes_2 = nodes; _i < nodes_2.length; _i++) {
-                    var babylonTransformNode = nodes_2[_i];
+                var _loop_1 = function (babylonTransformNode) {
                     if (shouldExportTransformNode(babylonTransformNode)) {
-                        node = this.createNode(babylonTransformNode, binaryWriter);
-                        var directDescendents = babylonTransformNode.getDescendants(true, function (node) { return (node instanceof BABYLON.TransformNode); });
-                        if (directDescendents.length || node.mesh != null) {
-                            this._nodes.push(node);
-                            nodeIndex = this._nodes.length - 1;
-                            nodeMap[babylonTransformNode.uniqueId] = nodeIndex;
-                        }
-                        if (!babylonScene.animationGroups.length && babylonTransformNode.animations.length) {
-                            GLTF2._GLTFAnimation._CreateNodeAnimationFromTransformNodeAnimations(babylonTransformNode, runtimeGLTFAnimation, idleGLTFAnimations, nodeMap, this._nodes, binaryWriter, this._bufferViews, this._accessors, this._convertToRightHandedSystem, this._animationSampleRate);
-                        }
+                        promiseChain = promiseChain.then(function () {
+                            return _this.createNodeAsync(babylonTransformNode, binaryWriter).then(function (node) {
+                                var directDescendents = babylonTransformNode.getDescendants(true, function (node) { return (node instanceof BABYLON.TransformNode); });
+                                if (directDescendents.length || node.mesh != null) {
+                                    _this._nodes.push(node);
+                                    nodeIndex = _this._nodes.length - 1;
+                                    nodeMap[babylonTransformNode.uniqueId] = nodeIndex;
+                                }
+                                if (!babylonScene.animationGroups.length && babylonTransformNode.animations.length) {
+                                    GLTF2._GLTFAnimation._CreateNodeAnimationFromTransformNodeAnimations(babylonTransformNode, runtimeGLTFAnimation, idleGLTFAnimations, nodeMap, _this._nodes, binaryWriter, _this._bufferViews, _this._accessors, _this._convertToRightHandedSystem, _this._animationSampleRate);
+                                }
+                            });
+                        });
                     }
                     else {
                         "Excluding mesh " + babylonTransformNode.name;
                     }
+                };
+                for (var _i = 0, nodes_2 = nodes; _i < nodes_2.length; _i++) {
+                    var babylonTransformNode = nodes_2[_i];
+                    _loop_1(babylonTransformNode);
                 }
                 ;
-                if (runtimeGLTFAnimation.channels.length && runtimeGLTFAnimation.samplers.length) {
-                    this._animations.push(runtimeGLTFAnimation);
-                }
-                idleGLTFAnimations.forEach(function (idleGLTFAnimation) {
-                    if (idleGLTFAnimation.channels.length && idleGLTFAnimation.samplers.length) {
-                        _this._animations.push(idleGLTFAnimation);
+                return promiseChain.then(function () {
+                    if (runtimeGLTFAnimation.channels.length && runtimeGLTFAnimation.samplers.length) {
+                        _this._animations.push(runtimeGLTFAnimation);
                     }
+                    idleGLTFAnimations.forEach(function (idleGLTFAnimation) {
+                        if (idleGLTFAnimation.channels.length && idleGLTFAnimation.samplers.length) {
+                            _this._animations.push(idleGLTFAnimation);
+                        }
+                    });
+                    if (babylonScene.animationGroups.length) {
+                        GLTF2._GLTFAnimation._CreateNodeAnimationFromAnimationGroups(babylonScene, _this._animations, nodeMap, _this._nodes, binaryWriter, _this._bufferViews, _this._accessors, _this._convertToRightHandedSystem, _this._animationSampleRate);
+                    }
+                    return nodeMap;
                 });
-                if (babylonScene.animationGroups.length) {
-                    GLTF2._GLTFAnimation._CreateNodeAnimationFromAnimationGroups(babylonScene, this._animations, nodeMap, this._nodes, binaryWriter, this._bufferViews, this._accessors, this._convertToRightHandedSystem, this._animationSampleRate);
-                }
-                return nodeMap;
             };
             /**
              * Creates a glTF node from a Babylon mesh
@@ -1098,23 +1201,29 @@ var BABYLON;
              * @param binaryWriter Buffer for storing geometry data
              * @returns glTF node
              */
-            _Exporter.prototype.createNode = function (babylonTransformNode, binaryWriter) {
-                // create node to hold translation/rotation/scale and the mesh
-                var node = {};
-                // create mesh
-                var mesh = { primitives: [] };
-                if (babylonTransformNode.name) {
-                    node.name = babylonTransformNode.name;
-                }
-                // Set transformation
-                this.setNodeTransformation(node, babylonTransformNode);
-                this.setPrimitiveAttributes(mesh, babylonTransformNode, binaryWriter);
-                if (mesh.primitives.length) {
-                    this._meshes.push(mesh);
-                    node.mesh = this._meshes.length - 1;
-                }
-                return node;
+            _Exporter.prototype.createNodeAsync = function (babylonTransformNode, binaryWriter) {
+                var _this = this;
+                return Promise.resolve().then(function () {
+                    // create node to hold translation/rotation/scale and the mesh
+                    var node = {};
+                    // create mesh
+                    var mesh = { primitives: [] };
+                    if (babylonTransformNode.name) {
+                        node.name = babylonTransformNode.name;
+                    }
+                    // Set transformation
+                    _this.setNodeTransformation(node, babylonTransformNode);
+                    return _this.setPrimitiveAttributesAsync(mesh, babylonTransformNode, binaryWriter).then(function () {
+                        if (mesh.primitives.length) {
+                            _this._meshes.push(mesh);
+                            node.mesh = _this._meshes.length - 1;
+                        }
+                        return node;
+                    });
+                });
             };
+            _Exporter._ExtensionNames = new Array();
+            _Exporter._ExtensionFactories = {};
             return _Exporter;
         }());
         GLTF2._Exporter = _Exporter;
@@ -1146,20 +1255,23 @@ var BABYLON;
                 }
                 this._arrayBuffer = newBuffer;
                 this._dataView = new DataView(this._arrayBuffer);
+                return newBuffer;
             };
             /**
              * Get an array buffer with the length of the byte offset
              * @returns ArrayBuffer resized to the byte offset
              */
             _BinaryWriter.prototype.getArrayBuffer = function () {
-                this.resizeBuffer(this.getByteOffset());
-                return this._arrayBuffer;
+                return this.resizeBuffer(this.getByteOffset());
             };
             /**
              * Get the byte offset of the array buffer
              * @returns byte offset
              */
             _BinaryWriter.prototype.getByteOffset = function () {
+                if (this._byteOffset == undefined) {
+                    throw new Error("Byte offset is undefined!");
+                }
                 return this._byteOffset;
             };
             /**
@@ -2318,12 +2430,22 @@ var BABYLON;
              * Extracts a texture from a Babylon texture into file data and glTF data
              * @param babylonTexture Babylon texture to extract
              * @param mimeType Mime Type of the babylonTexture
-             * @param images Array of glTF images
-             * @param textures Array of glTF textures
-             * @param imageData map of image file name and data
              * @return glTF texture info, or null if the texture format is not supported
              */
             _GLTFMaterialExporter.prototype._exportTextureAsync = function (babylonTexture, mimeType) {
+                var _this = this;
+                var extensionPromise = this._exporter._extensionsPreExportTextureAsync("exporter", babylonTexture, mimeType);
+                if (!extensionPromise) {
+                    return this._exportTextureInfoAsync(babylonTexture, mimeType);
+                }
+                return extensionPromise.then(function (texture) {
+                    if (!texture) {
+                        return _this._exportTextureInfoAsync(babylonTexture, mimeType);
+                    }
+                    return _this._exportTextureInfoAsync(texture, mimeType);
+                });
+            };
+            _GLTFMaterialExporter.prototype._exportTextureInfoAsync = function (babylonTexture, mimeType) {
                 var _this = this;
                 return Promise.resolve().then(function () {
                     var textureUid = babylonTexture.uid;
@@ -3291,3 +3413,98 @@ var BABYLON;
 })(BABYLON || (BABYLON = {}));
 
 //# sourceMappingURL=babylon.glTFUtilities.js.map
+
+/// <reference path="../../../../dist/preview release/gltf2Interface/babylon.glTF2Interface.d.ts"/>
+
+//# sourceMappingURL=babylon.glTFExporterExtension.js.map
+
+/// <reference path="../../../dist/preview release/glTF2Interface/babylon.glTF2Interface.d.ts"/>
+
+//# sourceMappingURL=babylon.glTFFileExporter.js.map
+
+/// <reference path="../../../../../dist/preview release/gltf2Interface/babylon.glTF2Interface.d.ts"/>
+var BABYLON;
+(function (BABYLON) {
+    var GLTF2;
+    (function (GLTF2) {
+        var Extensions;
+        (function (Extensions) {
+            var NAME = "KHR_texture_transform";
+            /**
+             * @hidden
+             */
+            var Exporter_KHR_texture_transform = /** @class */ (function () {
+                function Exporter_KHR_texture_transform(exporter) {
+                    /** Name of this extension */
+                    this.name = NAME;
+                    /** Defines whether this extension is enabled */
+                    this.enabled = true;
+                    /** Defines whether this extension is required */
+                    this.required = false;
+                    this._exporter = exporter;
+                }
+                Exporter_KHR_texture_transform.prototype.dispose = function () {
+                    delete this._exporter;
+                };
+                Exporter_KHR_texture_transform.prototype.preExportTextureAsync = function (context, babylonTexture, mimeType) {
+                    var _this = this;
+                    return new Promise(function (resolve, reject) {
+                        var texture_transform_extension = {};
+                        if (babylonTexture.uOffset !== 0 || babylonTexture.vOffset !== 0) {
+                            texture_transform_extension.offset = [babylonTexture.uOffset, babylonTexture.vOffset];
+                        }
+                        if (babylonTexture.uScale !== 1 || babylonTexture.vScale !== 1) {
+                            texture_transform_extension.scale = [babylonTexture.uScale, babylonTexture.vScale];
+                        }
+                        if (babylonTexture.wAng !== 0) {
+                            texture_transform_extension.rotation = babylonTexture.wAng;
+                        }
+                        if (!Object.keys(texture_transform_extension).length) {
+                            resolve(babylonTexture);
+                        }
+                        var scale = texture_transform_extension.scale ? new BABYLON.Vector2(texture_transform_extension.scale[0], texture_transform_extension.scale[1]) : BABYLON.Vector2.One();
+                        var rotation = texture_transform_extension.rotation != null ? texture_transform_extension.rotation : 0;
+                        var offset = texture_transform_extension.offset ? new BABYLON.Vector2(texture_transform_extension.offset[0], texture_transform_extension.offset[1]) : BABYLON.Vector2.Zero();
+                        var scene = babylonTexture.getScene();
+                        if (!scene) {
+                            reject(context + ": \"scene\" is not defined for Babylon texture " + babylonTexture.name + "!");
+                        }
+                        else {
+                            _this.textureTransformTextureAsync(babylonTexture, offset, rotation, scale, scene).then(function (texture) {
+                                resolve(texture);
+                            });
+                        }
+                    });
+                };
+                /**
+                 * Transform the babylon texture by the offset, rotation and scale parameters using a procedural texture
+                 * @param babylonTexture
+                 * @param offset
+                 * @param rotation
+                 * @param scale
+                 * @param scene
+                 */
+                Exporter_KHR_texture_transform.prototype.textureTransformTextureAsync = function (babylonTexture, offset, rotation, scale, scene) {
+                    return new Promise(function (resolve, reject) {
+                        var proceduralTexture = new BABYLON.ProceduralTexture("" + babylonTexture.name, babylonTexture.getSize(), "textureTransform", scene);
+                        if (!proceduralTexture) {
+                            BABYLON.Tools.Log("Cannot create procedural texture for " + babylonTexture.name + "!");
+                            resolve(babylonTexture);
+                        }
+                        proceduralTexture.setTexture("textureSampler", babylonTexture);
+                        proceduralTexture.setMatrix("textureTransformMat", babylonTexture.getTextureMatrix());
+                        // Note: onLoadObservable would be preferable but it does not seem to be resolving...
+                        scene.whenReadyAsync().then(function () {
+                            resolve(proceduralTexture);
+                        });
+                    });
+                };
+                return Exporter_KHR_texture_transform;
+            }());
+            Extensions.Exporter_KHR_texture_transform = Exporter_KHR_texture_transform;
+            GLTF2._Exporter.RegisterExtension(NAME, function (exporter) { return new Exporter_KHR_texture_transform(exporter); });
+        })(Extensions = GLTF2.Extensions || (GLTF2.Extensions = {}));
+    })(GLTF2 = BABYLON.GLTF2 || (BABYLON.GLTF2 = {}));
+})(BABYLON || (BABYLON = {}));
+
+//# sourceMappingURL=Exporter_KHR_texture_transform.js.map
