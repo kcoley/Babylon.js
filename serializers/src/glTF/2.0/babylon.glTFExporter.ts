@@ -134,7 +134,9 @@ module BABYLON.GLTF2 {
                     const activeLoaderExtensions = exporterProperty._activeLoaderExtensions;
                     if (!activeLoaderExtensions[name]) {
                         activeLoaderExtensions[name] = true;
-
+                        if(this._extensionsUsed.indexOf(name) == -1){
+                            this._extensionsUsed.push(name);
+                        }
                         try {
                             const result = actionAsync(extension);
                             if (result) {
@@ -158,6 +160,10 @@ module BABYLON.GLTF2 {
         
         public _extensionsPostExportMeshPrimitiveAsync(context: string, meshPrimitive: IMeshPrimitive, babylonSubMesh: SubMesh, binaryWriter: _BinaryWriter): Nullable<Promise<IMeshPrimitive>> {
             return this._applyExtensions(meshPrimitive, extension => extension.postExportMeshPrimitiveAsync && extension.postExportMeshPrimitiveAsync(context, meshPrimitive, babylonSubMesh, binaryWriter));
+        }
+
+        public _extensionsPostExportMaterialAsync(context: string, babylonMaterial: IMaterial): Nullable<Promise<IMaterial>> {
+            return this._applyExtensions(babylonMaterial, extension => extension.postExportMaterialAsync && extension.postExportMaterialAsync(context, babylonMaterial));
         }
 
         /**
@@ -730,26 +736,35 @@ module BABYLON.GLTF2 {
          */
         public _generateGLTFAsync(glTFPrefix: string): Promise<GLTFData> {
             return this._generateBinaryAsync().then(binaryBuffer => {
-                const jsonText = this.generateJSON(false, glTFPrefix, true);
-                const bin = new Blob([binaryBuffer], { type: 'application/octet-stream' });
-
-                const glTFFileName = glTFPrefix + '.gltf';
-                const glTFBinFile = glTFPrefix + '.bin';
-
-                const container = new GLTFData();
-
-                container.glTFFiles[glTFFileName] = jsonText;
-                container.glTFFiles[glTFBinFile] = bin;
-
-                if (this._imageData) {
-                    for (let image in this._imageData) {
-                        container.glTFFiles[image] = new Blob([this._imageData[image].data], { type: this._imageData[image].mimeType });
+                // Apply post material extensions
+                var promises = new Array<Promise<IMaterial>>();
+                for(var i = 0; i < this._materials.length;i++){
+                    var promise = this._extensionsPostExportMaterialAsync("postExport", this._materials[i]);
+                    if(promise){
+                        promises.push(promise);
                     }
-                }
+                }                
+                return Promise.all(promises).then(()=>{
+                    const jsonText = this.generateJSON(false, glTFPrefix, true);
+                    const bin = new Blob([binaryBuffer], { type: 'application/octet-stream' });
 
-                return container;
+                    const glTFFileName = glTFPrefix + '.gltf';
+                    const glTFBinFile = glTFPrefix + '.bin';
+
+                    const container = new GLTFData();
+
+                    container.glTFFiles[glTFFileName] = jsonText;
+                    container.glTFFiles[glTFBinFile] = bin;
+
+                    if (this._imageData) {
+                        for (let image in this._imageData) {
+                            container.glTFFiles[image] = new Blob([this._imageData[image].data], { type: this._imageData[image].mimeType });
+                        }
+                    }
+
+                    return container;
+                });
             });
-
         }
 
         /**

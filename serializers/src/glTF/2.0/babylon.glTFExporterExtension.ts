@@ -24,7 +24,13 @@ module BABYLON.GLTF2 {
          */
         postExportMeshPrimitiveAsync?(context: string, meshPrimitive: IMeshPrimitive, babylonSubMesh: SubMesh, binaryWriter: _BinaryWriter): Nullable<Promise<IMeshPrimitive>>;
 
-
+        /**
+         * Define this method to modify the default behavior before exporting a material
+         * @param context The context when loading the asset
+         * @param babylonMaterial The glTF material info property
+         * @returns A promise that resolves with the exported glTF material info when the export is complete, or null if not handled
+         */
+        postExportMaterialAsync?(context: string, babylonMaterial: IMaterial): Nullable<Promise<IMaterial>>;
     }
 }
 
