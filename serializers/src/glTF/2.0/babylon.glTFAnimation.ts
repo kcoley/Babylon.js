@@ -118,6 +118,21 @@ module BABYLON.GLTF2.Exporter {
             return null;
         }
 
+        public static _CreateSkeleton(babylonTransformNode: TransformNode) {
+            if (babylonTransformNode instanceof Mesh) {
+                const skeleton = babylonTransformNode.skeleton;
+                if (skeleton) {
+                    const bones = skeleton.bones;
+                    for (const bone of bones) {
+                        const baseMatrix = bone.getBaseMatrix()
+                        const localMatrix = bone.getLocalMatrix();
+                        
+                        
+                    }
+                }
+            }
+        }
+
         private static _DeduceAnimationInfo(animation: Animation): Nullable<_IAnimationInfo> {
             let animationChannelTargetPath: Nullable<AnimationChannelTargetPath> = null;
             let dataAccessorType = AccessorType.VEC3;
