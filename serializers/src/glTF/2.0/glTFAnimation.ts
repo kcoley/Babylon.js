@@ -1,7 +1,7 @@
-import { AnimationSamplerInterpolation, AnimationChannelTargetPath, AccessorType, IAnimation, INode, IBufferView, IAccessor, IAnimationSampler, IAnimationChannel, AccessorComponentType } from "babylonjs-gltf2interface";
+import { AnimationSamplerInterpolation, AnimationChannelTargetPath, AccessorType, IAnimation, INode, IBufferView, IAccessor, IAnimationSampler, IAnimationChannel, AccessorComponentType, ISkin } from "babylonjs-gltf2interface";
 
 import { Nullable } from "babylonjs/types";
-import { Vector3, Quaternion } from "babylonjs/Maths/math";
+import { Vector3, Quaternion, Matrix } from "babylonjs/Maths/math";
 import { Tools } from "babylonjs/Misc/tools";
 import { Animation, IAnimationKey, AnimationKeyInterpolation } from "babylonjs/Animations/animation";
 import { TransformNode } from "babylonjs/Meshes/transformNode";
@@ -263,6 +263,105 @@ export class _GLTFAnimation {
                     glTFAnimations.push(glTFAnimation);
                 }
             }
+        }
+    }
+    /**
+     * Create glTF skeletons from the skeleton data
+     * @param babylonScene BabylonJS scene
+     * @param skeletonNodeMap Mapping from BabylonJS skeletons to glTF nodes
+     * @param nodes glTF nodes
+     * @param skins glTF skins
+     * @param binaryWriter Writer for generating glTF binary data
+     * @param bufferViews glTF buffer views
+     * @param accessors glTF accessors
+     * @param convertToRightHandedSystem Specifies if the data should be converted to right-handed coordinate system
+     */
+    public static _CreateSkinsFromSkeletons(babylonScene: Scene, skeletonNodeMap: { [key: string]: number }, nodes: INode[], skins: ISkin[], binaryWriter: _BinaryWriter, bufferViews: IBufferView[], accessors: IAccessor[], convertToRightHandedSystem: boolean) {
+        for (let skeleton of babylonScene.skeletons) {
+            let skeletonNode = nodes[skeletonNodeMap[skeleton.id]];
+            let nodeWorldMatrix: Matrix;
+
+            if (skeletonNode.matrix) {
+                nodeWorldMatrix = Matrix.FromArray(skeletonNode.matrix);
+            }
+            else {
+                let translation = Vector3.FromArray(skeletonNode.translation ? skeletonNode.translation : [0,0,0]);
+                let rotation = Quaternion.FromArray(skeletonNode.rotation ? skeletonNode.rotation : [0,0,0,1]);
+                let scale = Vector3.FromArray(skeletonNode.scale ? skeletonNode.scale : [1,1,1]);
+                nodeWorldMatrix = Matrix.Compose(scale, rotation, translation);
+            }
+
+            const inverseBindMatrices: Matrix[] = [];
+            const joints: number[] = [];
+
+            for (let bone of skeleton.bones) {
+                // create a node for each bone
+                // get inverse bind matrix
+                let node: INode = {
+                    name: bone.name
+                }
+
+                let boneWorldMatrix = bone.getWorldMatrix();
+                let inverseBindMatrix = nodeWorldMatrix.multiply(Matrix.Invert(boneWorldMatrix));
+                inverseBindMatrices.push(inverseBindMatrix);
+                bone.getRestPose();
+                let matrix = bone.getLocalMatrix();
+                const scale = Vector3.One();
+                const rotation = Quaternion.Identity();
+                const translation = Vector3.Zero();
+                if (convertToRightHandedSystem) { 
+                    matrix.decompose(scale, rotation, translation);
+                    translation.z *= -1;
+                    rotation.x *= -1;
+                    rotation.y *= -1;
+                    matrix = Matrix.Compose(scale, rotation, translation);
+                }
+                if (!translation.equals(Vector3.Zero())) {
+                    node.translation = translation.asArray();
+                }
+                if (!rotation.equals(Quaternion.Identity())) {
+                    node.rotation = rotation.asArray();
+                }
+                if (!scale.equals(Vector3.One())) {
+                    node.scale = scale.asArray();
+                }
+                nodes.push(node);
+                let nodeIndex = nodes.length - 1;
+                joints.push(nodeIndex);
+            }
+            const byteOffset = binaryWriter.getByteOffset();
+            // write binary data
+            for (let inverseBindMatrix of inverseBindMatrices) {
+                for (let i = 0; i < inverseBindMatrix.m.length; ++i) {
+                    binaryWriter.setFloat32(inverseBindMatrix.m[i]);
+                }
+            }
+            const byteLength = binaryWriter.getByteOffset() - byteOffset;
+            // create bufferview
+            let bufferView = _GLTFUtilities._CreateBufferView(0, binaryWriter.getByteOffset(), byteLength, undefined, `${name}  inverse bind matrix data`);
+            bufferViews.push(bufferView);
+            let inverseBindMatricesBufferviewIndex = bufferViews.length - 1;
+
+            // create accessor
+            let accessor = _GLTFUtilities._CreateAccessor(inverseBindMatricesBufferviewIndex, `${name}  inverse bind matrix data`, AccessorType.MAT4, AccessorComponentType.FLOAT, inverseBindMatrices.length, null, null, null);
+            accessors.push(accessor);
+            let inverseBindMatricesAccessorIndex = accessors.length - 1;
+
+            const skin: ISkin = {
+                name : skeleton.name,
+                joints: joints,
+                inverseBindMatrices: inverseBindMatricesAccessorIndex
+            };
+
+            skins.push(skin);
+
+            // handle joint hierarchy
+            // for (let i = 0; i < skeleton.bones.length; ++i) {
+            //     let babylonBone = skeleton.bones[i];
+            //     for (let childBone of babylonBone.children) {
+
+            //     }
+            // }
         }
     }
 

@@ -1,4 +1,4 @@
-import { AccessorType, IBufferView, IAccessor, INode, IAsset, IScene, IMesh, IMaterial, ITexture, IImage, ISampler, IAnimation, ImageMimeType, IMeshPrimitive, IBuffer, IGLTF, MeshPrimitiveMode, AccessorComponentType } from "babylonjs-gltf2interface";
+import { AccessorType, IBufferView, IAccessor, INode, IAsset, IScene, IMesh, IMaterial, ITexture, IImage, ISampler, IAnimation, ImageMimeType, IMeshPrimitive, IBuffer, IGLTF, MeshPrimitiveMode, AccessorComponentType, ISkin } from "babylonjs-gltf2interface";
 
 import { FloatArray, Nullable, IndicesArray } from "babylonjs/types";
 import { Viewport, Color3, Vector2, Vector3, Vector4, Quaternion } from "babylonjs/Maths/math";
@@ -65,6 +65,10 @@ export class _Exporter {
      */
     private _nodes: INode[];
     /**
+     * Stores all the generated glTF skins
+     */
+    private _skins: ISkin[];
+    /**
      * Stores the glTF asset information, which represents the glTF version and this file generator
      */
     private _asset: IAsset;
@@ -80,6 +84,11 @@ export class _Exporter {
      * Stores all the generated material information, which represents the appearance of each primitive
      */
     public _materials: IMaterial[];
+
+    /**
+     * Stores a mapping between Babylon.js skeletons and glTF nodes
+     */
+    public _skeletonNodeMap: { [skeletonID: string]: number};
 
     public _materialMap: { [materialID: number]: number };
     /**
@@ -208,9 +217,11 @@ export class _Exporter {
         this._meshes = [];
         this._scenes = [];
         this._nodes = [];
+        this._skins = [];
         this._images = [];
         this._materials = [];
         this._materialMap = [];
+        this._skeletonNodeMap = {};
         this._textures = [];
         this._samplers = [];
         this._animations = [];
@@ -685,6 +696,9 @@ export class _Exporter {
         if (this._meshes && this._meshes.length) {
             glTF.meshes = this._meshes;
         }
+        if (this._skins && this._skins.length) {
+            glTF.skins = this._skins;
+        }
         if (this._scenes && this._scenes.length) {
             glTF.scenes = this._scenes;
             glTF.scene = 0;
@@ -1052,11 +1066,12 @@ export class _Exporter {
 
     /**
      * Sets data for the primitive attributes of each submesh
+     * @param node glTF Node object to store node data
      * @param mesh glTF Mesh object to store the primitive attribute information
      * @param babylonTransformNode Babylon mesh to get the primitive attribute data from
      * @param binaryWriter Buffer to write the attribute data to
      */
-    private setPrimitiveAttributesAsync(mesh: IMesh, babylonTransformNode: TransformNode, binaryWriter: _BinaryWriter): Promise<void> {
+    private setPrimitiveAttributesAsync(node: INode, mesh: IMesh, babylonTransformNode: TransformNode, binaryWriter: _BinaryWriter): Promise<void> {
         let promises: Promise<IMeshPrimitive>[] = [];
         let bufferMesh: Nullable<Mesh> = null;
         let bufferView: IBufferView;
@@ -1079,6 +1094,9 @@ export class _Exporter {
         ];
 
         if (bufferMesh) {
+            if (bufferMesh.skeleton != null) {
+                this._skeletonNodeMap[bufferMesh.skeleton.id] = this._nodes.length;
+            }
             let indexBufferViewIndex: Nullable<number> = null;
             const primitiveMode = this.getMeshPrimitiveMode(bufferMesh);
             let vertexAttributeBufferViews: { [attributeKind: string]: number } = {};
@@ -1355,6 +1373,9 @@ export class _Exporter {
             if (babylonScene.animationGroups.length) {
                 _GLTFAnimation._CreateNodeAnimationFromAnimationGroups(babylonScene, this._animations, nodeMap, this._nodes, binaryWriter, this._bufferViews, this._accessors, this._convertToRightHandedSystem, this._animationSampleRate);
             }
+            if (babylonScene.skeletons.length) {
+                _GLTFAnimation._CreateSkinsFromSkeletons(babylonScene, this._skeletonNodeMap, this._nodes, this._skins, binaryWriter, this._bufferViews, this._accessors, this._convertToRightHandedSystem);
+            }
 
             return nodeMap;
         });
@@ -1380,7 +1401,7 @@ export class _Exporter {
             // Set transformation
             this.setNodeTransformation(node, babylonTransformNode);
 
-            return this.setPrimitiveAttributesAsync(mesh, babylonTransformNode, binaryWriter).then(() => {
+            return this.setPrimitiveAttributesAsync(node, mesh, babylonTransformNode, binaryWriter).then(() => {
                 if (mesh.primitives.length) {
                     this._meshes.push(mesh);
                     node.mesh = this._meshes.length - 1;
